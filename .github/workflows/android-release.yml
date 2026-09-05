@@ -7,6 +7,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: '要发布的版本 tag（如 v3.0.2），仅 workflow_dispatch 使用'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -118,15 +123,39 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: 发布 GitHub Release（仅 tag 触发）
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: 计算发布版本
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ver="${{ inputs.version }}"
+            if [[ -z "$ver" ]]; then
+              echo "::error::workflow_dispatch 需要提供 version 输入（如 v3.0.2）。"
+              exit 1
+            fi
+          else
+            ver="$GITHUB_REF_NAME"
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: 创建 tag（workflow_dispatch 时）
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="$GITHUB_REF_NAME"
-          printf -v notes 'Eta %s 发布构建。\n\n由 GitHub Actions 自动构建：\n- Debug APK（未签名）\n- Release APK（已签名）' "$tag"
+          git config user.email "actions@users.noreply.github.com"
+          git config user.name "GitHub Actions"
+          git tag "${{ steps.version.outputs.version }}" 2>/dev/null || true
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${{ steps.version.outputs.version }}" 2>/dev/null || true
+
+      - name: 发布 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.version }}"
+          printf -v notes 'Eta %s 发布构建。\n\n由 GitHub Actions 自动构建：\n- Debug APK\n- Release APK（已签名）' "$tag"
           gh release create "$tag" \
             "$RUNNER_TEMP/apks/app-debug.apk" \
             "$RUNNER_TEMP/apks/app-release.apk" \
             --title "Eta $tag" \
-            --notes "$notes"
+            --notes "$notes" || echo "::warning::Release $tag 已存在或创建失败，跳过。"
