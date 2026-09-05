@@ -39,13 +39,14 @@ class AgentMemoryContextBuilderTest {
     }
 
     @Test
-    fun detailsWithoutCoreHeadingAreIndexedButNotAutomaticallyInjected() {
+    fun detailsWithoutCoreHeadingFallBackToFirstHeading() {
         val context = AgentMemoryContextBuilder.build(
             snapshot("# 项目\n只应按需读取的细节"),
             256_000,
         )
 
-        assertEquals("", context.coreContent)
+        // 无 # 核心记忆 时回退到首个标题段，避免 <memory_core> 永远为空（迁移后正确行为）
+        assertEquals("# 项目\n只应按需读取的细节", context.coreContent)
         assertEquals("# 项目", context.headingIndex)
     }
 

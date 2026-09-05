@@ -60,7 +60,7 @@ class AgentPromptBuilderTest {
         )
 
         assertEquals(
-            listOf("system", "system", "system", "user", "assistant", "user"),
+            listOf("system", "system", "system", "system", "user", "assistant", "user"),
             messages.roles(),
         )
         assertEquals("自定义系统约束", messages.getJSONObject(0).getString("content"))
@@ -95,10 +95,10 @@ class AgentPromptBuilderTest {
         assertTrue(messages.getJSONObject(2).getString("content").contains("同一轮模型回复最多调用一次 read_image"))
         assertTrue(messages.getJSONObject(2).getString("content").contains("再在下一轮调用下一张"))
         assertFalse(messages.systemContents().any { it.contains("网页浏览、读取") })
-        assertEquals("旧问题", messages.getJSONObject(3).getString("content"))
-        assertEquals("旧回答", messages.getJSONObject(4).getString("content"))
+        assertEquals("旧问题", messages.getJSONObject(4).getString("content"))
+        assertEquals("旧回答", messages.getJSONObject(5).getString("content"))
 
-        val currentContent = messages.getJSONObject(5).getJSONArray("content")
+        val currentContent = messages.getJSONObject(6).getJSONArray("content")
         assertEquals("当前问题", currentContent.getJSONObject(0).getString("text"))
         assertEquals(
             image.reference,

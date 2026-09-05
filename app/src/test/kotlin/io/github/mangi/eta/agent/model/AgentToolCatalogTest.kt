@@ -191,6 +191,7 @@ class AgentToolCatalogTest {
             memoryTools = true,
         )
         assertTrue("memory_get" in enabled.toolNames())
+        assertTrue("memory_search" in enabled.toolNames())
         val write = enabled.function("memory_write")
         val properties = write.getJSONObject("parameters").getJSONObject("properties")
         assertEquals(3_500, properties.getJSONObject("content").getInt("maxLength"))

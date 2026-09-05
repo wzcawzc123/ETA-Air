@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class EtaDatabaseMigrationTest {
     @Test
-    fun migration6To18PreservesDataAndMovesBoundedConversationContext() {
+    fun migration6To20PreservesDataAndMovesBoundedConversationContext() {
         val context = RuntimeEnvironment.getApplication() as Context
         val databaseName = "migration-${UUID.randomUUID()}.db"
         createVersion6Database(context, databaseName)
@@ -51,6 +51,8 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_15_16,
                 migration16To17WithMcpData,
                 EtaDatabase.MIGRATION_17_18,
+                EtaDatabase.MIGRATION_18_19,
+                EtaDatabase.MIGRATION_19_20,
             )
             .build()
         try {
@@ -120,6 +122,37 @@ class EtaDatabaseMigrationTest {
                 listOf(ModelSource.CATALOG, ModelSource.MANUAL),
                 provider.models.map { it.source },
             )
+            // v18→v19：conversation_summaries 表可读写。
+            val summaryDao = database.conversationSummaryDao()
+            runBlocking(Dispatchers.IO) {
+                summaryDao.upsert(
+                    ConversationSummaryEntity(
+                        conversationId = "conv-1",
+                        summary = "滚动摘要",
+                        summarizedTurns = 12,
+                        updatedAt = 1L,
+                    )
+                )
+            }
+            val stored = runBlocking(Dispatchers.IO) { summaryDao.summary("conv-1") }
+            assertEquals("滚动摘要", stored?.summary)
+            assertEquals(12, stored?.summarizedTurns)
+
+            // v19→v20：conversation_session_state 表可读写。
+            val sessionStateDao = database.conversationSessionStateDao()
+            runBlocking(Dispatchers.IO) {
+                sessionStateDao.upsert(
+                    ConversationSessionStateEntity(
+                        conversationId = "conv-1",
+                        sessionState = "目标：完成迁移",
+                        updatedAt = 2L,
+                    )
+                )
+            }
+            val storedState = runBlocking(Dispatchers.IO) {
+                sessionStateDao.get("conv-1")
+            }
+            assertEquals("目标：完成迁移", storedState?.sessionState)
         } finally {
             database.close()
             context.deleteDatabase(databaseName)
