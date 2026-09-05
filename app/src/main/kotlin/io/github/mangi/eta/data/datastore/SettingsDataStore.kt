@@ -30,6 +30,7 @@ internal object SettingsDataStore {
     private val MEMORY_ENABLED = booleanPreferencesKey("memory_enabled")
     private val FACT_DISTILL_ENABLED = booleanPreferencesKey("fact_distill_enabled")
     private val IMAGE_SUMMARY_ENABLED = booleanPreferencesKey("image_summary_enabled")
+    private val CONVERSATION_SUMMARY_ENABLED = booleanPreferencesKey("conversation_summary_enabled")
     private val LINUX_DISTRIBUTION = stringPreferencesKey("linux_distribution")
     private val APPEARANCE_THEME_MODE = stringPreferencesKey("appearance_theme_mode")
     private val APPEARANCE_MONET_ENABLED = booleanPreferencesKey("appearance_monet_enabled")
@@ -81,6 +82,7 @@ internal object SettingsDataStore {
             prefs[MEMORY_ENABLED] = updated.memoryEnabled
             prefs[FACT_DISTILL_ENABLED] = updated.factDistillEnabled
             prefs[IMAGE_SUMMARY_ENABLED] = updated.imageSummaryEnabled
+            prefs[CONVERSATION_SUMMARY_ENABLED] = updated.conversationSummaryEnabled
             prefs.putAppearance(updated.appearance.normalized())
         }
     }
@@ -113,6 +115,9 @@ internal object SettingsDataStore {
 
     fun imageSummaryEnabledFlow(): Flow<Boolean> =
         settingsFlow().map { it.imageSummaryEnabled }
+
+    fun conversationSummaryEnabledFlow(): Flow<Boolean> =
+        settingsFlow().map { it.conversationSummaryEnabled }
 
     fun linuxDistributionFlow(): Flow<String?> {
         ensureInitialized()
@@ -185,6 +190,10 @@ internal object SettingsDataStore {
         updateSettings { it.copy(imageSummaryEnabled = enabled) }
     }
 
+    suspend fun setConversationSummaryEnabled(enabled: Boolean) {
+        updateSettings { it.copy(conversationSummaryEnabled = enabled) }
+    }
+
     suspend fun setLinuxDistribution(value: String?) {
         ensureInitialized()
         dataStore.edit { preferences -> preferences.putOrRemove(LINUX_DISTRIBUTION, value) }
@@ -223,6 +232,7 @@ internal object SettingsDataStore {
         memoryEnabled = this[MEMORY_ENABLED] ?: true,
         factDistillEnabled = this[FACT_DISTILL_ENABLED] ?: false,
         imageSummaryEnabled = this[IMAGE_SUMMARY_ENABLED] ?: true,
+        conversationSummaryEnabled = this[CONVERSATION_SUMMARY_ENABLED] ?: true,
         appearance = AppearanceSettings(
             themeMode = AppearanceThemeMode.fromPersistedValue(this[APPEARANCE_THEME_MODE]),
             monetEnabled = this[APPEARANCE_MONET_ENABLED] ?: false,

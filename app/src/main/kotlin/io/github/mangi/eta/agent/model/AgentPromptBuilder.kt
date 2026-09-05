@@ -182,7 +182,6 @@ internal object AgentPromptBuilder {
                 "当记忆（MEMORY.md 核心）出现重复/重叠/同义条目时，用 memory_consolidate 把它们合并成一条规范表述，" +
                     "保持记忆精简、不冗余；同类信息只保留一条。"
             )
-            appendLine("revision=${context.revision} | bytes=${context.byteSize} | core_budget_chars=${context.coreBudgetChars}")
             if (context.coreContent.isNotBlank()) {
                 appendLine()
                 appendLine("<memory_core>")

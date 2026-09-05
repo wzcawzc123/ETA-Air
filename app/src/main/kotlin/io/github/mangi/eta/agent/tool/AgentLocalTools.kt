@@ -18,8 +18,10 @@ import io.github.mangi.eta.agent.model.AgentSensitiveToolPolicy
 import io.github.mangi.eta.agent.model.ConsolidateMerge
 import io.github.mangi.eta.agent.model.ConsolidatePlan
 import io.github.mangi.eta.agent.model.MemoryConsolidate
+import io.github.mangi.eta.agent.model.OnnxMemoryEmbedder
 import io.github.mangi.eta.agent.model.SessionState
 import io.github.mangi.eta.agent.model.SessionStateCodec
+import io.github.mangi.eta.agent.model.VectorMath
 import io.github.mangi.eta.agent.overlay.AgentHapticFeedback
 import io.github.mangi.eta.agent.overlay.GestureIndicator
 import io.github.mangi.eta.agent.runtime.AgentAppContext
@@ -364,7 +366,7 @@ internal class AgentLocalTools(
             runCatching {
                 val summaries = ConversationSummaryStore.all()
                 val memoryContent = AgentMemoryRepository.snapshot().content
-                AgentMemorySearch.search(query, summaries, memoryContent)
+                semanticMemorySearch(query, summaries, memoryContent)
             }.getOrElse { emptyList() }
         }
         if (result.isEmpty()) {
@@ -388,6 +390,68 @@ internal class AgentLocalTools(
             })
             .toString()
     }
+
+    /**
+     * 语义化记忆检索：向量优先，关键词降级。
+     * 向量模型可用且查询/全部候选嵌入成功时，用 [VectorMath.cosine] 对"记忆行 + 会话摘要"打分，取 topK；
+     * 任一环节失败（模型缺失、查询嵌入失败、某条候选嵌入失败）则整体回退到 [AgentMemorySearch.search] 关键词召回，
+     * 保证"换说法也能召回"，且不因向量不可用而挂掉记忆主链路。
+     */
+    private suspend fun semanticMemorySearch(
+        query: String,
+        summaries: List<Pair<String, String>>,
+        memoryContent: String,
+    ): List<AgentMemorySearch.Hit> {
+        val embedder = OnnxMemoryEmbedder.get(context)
+        if (embedder == null) return AgentMemorySearch.search(query, summaries, memoryContent)
+
+        val queryVec = embedder.embed(query)
+        if (queryVec == null) return AgentMemorySearch.search(query, summaries, memoryContent)
+
+        val memoryLines = memoryContent.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+
+        val candidateVecs = ArrayList<FloatArray>(memoryLines.size + summaries.size)
+        val candidates = ArrayList<AgentMemorySearch.Hit>(memoryLines.size + summaries.size)
+
+        memoryLines.forEach { line ->
+            val vec = embedder.embed(cleanMemoryLine(line))
+                ?: return AgentMemorySearch.search(query, summaries, memoryContent)
+            candidateVecs += vec
+            candidates += AgentMemorySearch.Hit(
+                source = AgentMemorySearch.SOURCE_MEMORY,
+                snippet = line.take(AgentMemorySearch.MAX_SNIPPET_CHARS),
+                score = 0,
+            )
+        }
+        summaries.forEach { (conversationId, summary) ->
+            val vec = embedder.embed(summary)
+                ?: return AgentMemorySearch.search(query, summaries, memoryContent)
+            candidateVecs += vec
+            candidates += AgentMemorySearch.Hit(
+                source = AgentMemorySearch.SOURCE_SUMMARY,
+                snippet = summary.trim().take(AgentMemorySearch.MAX_SNIPPET_CHARS),
+                score = 0,
+                conversationLabel = conversationId,
+            )
+        }
+
+        if (candidateVecs.isEmpty()) return emptyList()
+
+        // 余弦相似度放大为整数分（保留排序量纲），负值/零值视为不相关并滤除。
+        val scores = candidateVecs.map { (VectorMath.cosine(queryVec, it) * 1_000f).toInt().coerceAtLeast(0) }
+        return candidates.indices
+            .filter { scores[it] > 0 }
+            .sortedByDescending { scores[it] }
+            .take(AgentMemorySearch.MAX_HITS)
+            .map { candidates[it].copy(score = scores[it]) }
+    }
+
+    /** 用于嵌入的"干净"记忆行：去掉 markdown 前缀与 [沉淀] 标记，避免把符号本身当作语义。 */
+    private fun cleanMemoryLine(line: String): String =
+        line.trim().removePrefix("- ").removePrefix("• ").replace("[沉淀]", "").trim()
 
     private fun memoryConsolidate(args: JSONObject): String {
         val mergesArr = args.optJSONArray("merges") ?: return errorResult("MISSING_MERGES", "缺少 merges")

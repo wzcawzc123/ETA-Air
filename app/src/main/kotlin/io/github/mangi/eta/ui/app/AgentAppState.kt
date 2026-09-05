@@ -25,8 +25,11 @@ import io.github.mangi.eta.agent.model.AgentFileReference
 import io.github.mangi.eta.agent.model.AgentFileReferenceKind
 import io.github.mangi.eta.agent.model.AgentFileReferencePolicy
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
+import io.github.mangi.eta.agent.model.AgentHistorySummary
+import io.github.mangi.eta.agent.model.AgentHistoryWindow
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.LlmAgentFactExtractor
+import io.github.mangi.eta.agent.model.LlmConversationSummarizer
 import io.github.mangi.eta.agent.model.MemoryAutoConsolidator
 import io.github.mangi.eta.agent.model.OnnxMemoryEmbedder
 import io.github.mangi.eta.agent.model.ProviderClientFactory
@@ -46,6 +49,8 @@ import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.datastore.SettingsDataStore
+import io.github.mangi.eta.data.db.ConversationMessageEntity
+import io.github.mangi.eta.data.db.EtaDatabase
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ReasoningEffort
 import io.github.mangi.eta.data.repository.AgentMemoryMutation
@@ -2364,19 +2369,70 @@ internal class AgentAppState(
     }
 
     /**
-     * P2：长对话滚动摘要（ETA-2 特性，ETA-Air 暂未启用）。
+     * P2：长对话滚动摘要（ETA-2 特性，已迁移到 ETA-Air）。
      *
-     * 依赖 LlmConversationSummarizer、AgentHistorySummary 与 Settings.conversationSummaryEnabled，
-     * 三者尚未迁移到 ETA-Air（无对应文件/字段）。完整搬入会产生未解析引用、编译失败，
-     * 故此处仅保留签名与触发点，特性暂不启用（静默 return，不破坏编译）。
-     * 待上述依赖补齐后，将 ETA-2 中本函数实现原样搬入即可。
+     * run 成功后异步生成/合并滚动摘要（fire-and-forget，失败静默）。本次 run 使用旧摘要
+     * （可能为 null），新摘要从下次 run 开始注入。已由 Settings.conversationSummaryEnabled 控制。
      */
     private fun maybeRegenerateConversationSummary(
         conversationId: String,
         history: List<AgentModelClient.ConversationMessage>,
         config: AgentModelClient.ModelConfig,
     ) {
-        return
+        scope.launch {
+            runCatching {
+                if (!SettingsDataStore.settings().conversationSummaryEnabled) return@launch
+                // 用数据库全量历史判定裁剪：UI checkpoint 只含最近几十条，会导致永不触发摘要。
+                val fullHistory = loadFullConversationHistory(conversationId).ifEmpty { history }
+                if (fullHistory.size < 2) return@launch
+                val windowed = AgentHistoryWindow.trim(fullHistory, config.contextWindow)
+                if (windowed.size >= fullHistory.size) return@launch
+                val trimmedTurns = fullHistory.take(fullHistory.size - windowed.size)
+                val trimmedUsers = AgentHistorySummary.trimmedUserTurnCount(fullHistory, windowed)
+                val existing = ConversationSummaryStore.summaryEntry(conversationId)
+                val existingTurns = existing?.summarizedTurns ?: 0
+                val existingSummary = existing?.summary
+                val newSinceLast = trimmedUsers - existingTurns
+                // 增量：只把上次已总结之后新被裁的轮次交给模型（修 P1-2 重复总结）。
+                val incremental = AgentHistorySummary.incrementalTurnsSince(trimmedTurns, existingTurns)
+                if (incremental.isEmpty()) return@launch
+                // 轮数未到阈值但内容已很密集时也触发，避免短对话信息在裁剪中丢失。
+                val pendingChars = AgentHistorySummary.serializedCharCount(incremental)
+                if (!AgentHistorySummary.needsRegeneration(newSinceLast, pendingChars = pendingChars)) return@launch
+                val summarizer = LlmConversationSummarizer(config, ProviderClientFactory.getClient(config))
+                val newSummary = summarizer.summarize(existingSummary, incremental)
+                ConversationSummaryStore.upsert(conversationId, newSummary, trimmedUsers)
+            }
+        }
+    }
+
+    /**
+     * 从数据库读取某会话的完整历史（user/assistant），供摘要裁剪判定使用。
+     * 分页读取（页大小与 AgentConversationStore 保持一致），映射为模型消息。
+     */
+    private suspend fun loadFullConversationHistory(
+        conversationId: String,
+    ): List<AgentModelClient.ConversationMessage> {
+        val dao = EtaDatabase.get(appContext).conversationDao()
+        val all = mutableListOf<ConversationMessageEntity>()
+        var offset = 0
+        while (true) {
+            val page = dao.messagesPage(conversationId, CONVERSATION_LOAD_PAGE_SIZE, offset)
+            all += page
+            if (page.size < CONVERSATION_LOAD_PAGE_SIZE) break
+            offset += page.size
+        }
+        return all.mapNotNull { entity ->
+            when (entity.type) {
+                "user" -> AgentModelClient.ConversationMessage(
+                    role = "user",
+                    content = entity.content,
+                )
+                "assistant" -> entity.content.takeIf { it.isNotBlank() }
+                    ?.let { AgentModelClient.ConversationMessage(role = "assistant", content = it) }
+                else -> null
+            }
+        }
     }
 
     /**
@@ -2432,6 +2488,9 @@ internal data class MessageRevisionImpact(
 )
 
 private const val EXTERNAL_ARCHIVE_CONVERSATION_PREFIX = "archive-"
+
+/** 读取某会话完整历史用于摘要裁剪判定的分页大小（对齐 AgentConversationStore 的加载页）。 */
+private const val CONVERSATION_LOAD_PAGE_SIZE = 128
 
 private fun String.isReadOnlyExternalArchiveConversation(): Boolean =
     startsWith(EXTERNAL_ARCHIVE_CONVERSATION_PREFIX)

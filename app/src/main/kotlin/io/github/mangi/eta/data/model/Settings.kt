@@ -9,5 +9,6 @@ data class Settings(
     val memoryEnabled: Boolean = true,
     val factDistillEnabled: Boolean = false,
     val imageSummaryEnabled: Boolean = true,
+    val conversationSummaryEnabled: Boolean = true,
     val appearance: AppearanceSettings = AppearanceSettings(),
 )
