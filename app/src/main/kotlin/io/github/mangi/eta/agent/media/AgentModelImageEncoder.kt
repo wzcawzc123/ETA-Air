@@ -18,6 +18,8 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 internal const val MAX_AGENT_IMAGE_BYTES = 12 * 1024 * 1024
+/** 用户相机原图常超过 12MiB，读取允许放宽到该安全上限，之后按需采样降级。 */
+internal const val MAX_USER_ATTACHMENT_INPUT_BYTES = 40 * 1024 * 1024
 
 /** 仅负责为工具截图和聊天预览生成独立的图片副本。 */
 internal object AgentModelImageEncoder {
@@ -101,6 +103,25 @@ internal object AgentModelImageEncoder {
             bytes = bytes,
             source = source,
             bounds = inspectBounds(bytes, mimeHint),
+            profile = toolVisionProfile,
+        )
+    }.getOrNull()
+
+    /**
+     * 用户附件统一按需采样降级：超过 12MiB 的原图不再整张放弃，而是缩放到视觉档
+     * （1600px/1.5M 像素）再发送，避免相机原图撑大请求体。
+     */
+    fun userAttachment(
+        bytes: ByteArray,
+        source: String,
+        mimeHint: String = "image/jpeg",
+    ): AgentModelClient.ModelImage? = runCatching {
+        if (bytes.isEmpty()) return@runCatching null
+        if (!bytes.hasSupportedImageMagic()) return@runCatching null
+        transcodeBytes(
+            bytes = bytes,
+            source = source,
+            bounds = inspectBoundsLoose(bytes, mimeHint),
             profile = toolVisionProfile,
         )
     }.getOrNull()
@@ -221,6 +242,21 @@ internal object AgentModelImageEncoder {
     private fun inspectBounds(bytes: ByteArray, mimeHint: String): ImageBounds {
         require(bytes.isNotEmpty()) { "图片内容为空" }
         require(bytes.size <= MAX_AGENT_IMAGE_BYTES) { "图片数据过大：${bytes.size}" }
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+        return ImageBounds(
+            width = options.outWidth,
+            height = options.outHeight,
+            mimeType = options.outMimeType
+                ?.takeIf { it.isNotBlank() }
+                ?: mimeHint.normalizedAgentImageMimeType(),
+        )
+    }
+
+    /** 与 [inspectBounds] 相同，仅使用更宽松的用户附件输入上限。 */
+    private fun inspectBoundsLoose(bytes: ByteArray, mimeHint: String): ImageBounds {
+        require(bytes.isNotEmpty()) { "图片内容为空" }
+        require(bytes.size <= MAX_USER_ATTACHMENT_INPUT_BYTES) { "图片数据过大：${bytes.size}" }
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
         return ImageBounds(

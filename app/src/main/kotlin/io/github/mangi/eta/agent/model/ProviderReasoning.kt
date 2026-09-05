@@ -199,10 +199,10 @@ internal object ProviderReasoning {
         if (effort != ReasoningEffort.OFF) {
             val providerEffort = when (effort) {
                 ReasoningEffort.MINIMAL -> unsupportedEffort("DeepSeek", effort)
-                ReasoningEffort.LOW,
+                ReasoningEffort.LOW -> ReasoningEffort.LOW
                 ReasoningEffort.MEDIUM,
-                ReasoningEffort.HIGH -> ReasoningEffort.HIGH
-                ReasoningEffort.XHIGH,
+                ReasoningEffort.HIGH,
+                ReasoningEffort.XHIGH -> ReasoningEffort.HIGH
                 ReasoningEffort.MAX -> ReasoningEffort.MAX
                 ReasoningEffort.DEFAULT,
                 ReasoningEffort.OFF -> return

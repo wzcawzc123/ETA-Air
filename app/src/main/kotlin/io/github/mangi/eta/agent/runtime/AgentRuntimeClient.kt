@@ -78,19 +78,12 @@ internal class AgentRuntimeClient(
             preparedImagesRef.set(preparedImages)
             msg.data = AgentRuntimeWire.toBundle(request, preparedImages.images)
             serviceMessenger.send(msg)
-            if (!resultLatch.await(RUN_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
-                runCatching {
-                    val cancelMessage = Message.obtain(null, AgentRuntimeWire.MSG_CANCEL)
-                    cancelMessage.data = AgentRuntimeWire.ackBundle(request.runId)
-                    serviceMessenger.send(cancelMessage)
-                }
-                return AgentRuntimeWire.RunResult(
-                    runId = request.runId,
-                    ok = false,
-                    content = "",
-                    error = "Agent Runtime 执行超时",
-                )
-            }
+            // 无上限等待首结果（适配长任务）。等待由以下路径释放：
+            // 1) run 正常完成/失败 -> onResult -> resultLatch.countDown()
+            // 2) 用户取消 -> MSG_CANCEL -> 服务端最终回结果
+            // 3) 服务进程死亡 -> deathRecipient -> resultLatch.countDown()
+            // 4) 线程中断 -> InterruptedException -> 外层 catch 处理
+            resultLatch.await()
             return resultRef.get() ?: AgentRuntimeWire.RunResult("", false, "", "Agent Runtime 未返回结果")
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
@@ -223,9 +216,9 @@ internal class AgentRuntimeClient(
             msg.replyTo = clientMessenger
             msg.data = AgentRuntimeWire.ackBundle(runId)
             lease.messenger.send(msg)
-            if (!terminalLatch.await(RUN_TIMEOUT_MINUTES, TimeUnit.MINUTES)) {
-                return AttachOutcome.Unavailable
-            }
+            // 无上限等待 run 终态（适配长任务），由 onResult / onAttachResponse(false)
+            // / binder 死亡 / 线程中断四条路径释放。
+            terminalLatch.await()
             resultRef.get()?.let { return AttachOutcome.Completed(it) }
             return if (attachedRef.get() == false) {
                 AttachOutcome.NotActive
@@ -325,7 +318,7 @@ internal class AgentRuntimeClient(
     }
 
     private companion object {
+        // 仅用于 IPC 请求-响应的 8 秒应答超时，不是任务时长限制。
         const val RESPONSE_TIMEOUT_SECONDS = 8L
-        const val RUN_TIMEOUT_MINUTES = 30L
     }
 }

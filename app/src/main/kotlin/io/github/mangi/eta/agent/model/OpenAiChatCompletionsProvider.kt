@@ -75,7 +75,7 @@ internal object OpenAiChatCompletionsProvider : AgentProviderClient {
 
                 if (!response.isSuccessful) {
                     val errorBody = response.body.string()
-                    error("模型接口返回 HTTP $code：${errorBody.compactError()}")
+                    throw ProviderHttpException(response.code, errorBody.compactError())
                 }
 
                 val assistantMessage = readStreamingAssistantMessage(response.body.byteStream(), runController, onEvent)

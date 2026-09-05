@@ -2,6 +2,8 @@ package io.github.mangi.eta.agent.model
 
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRunController
+import io.github.mangi.eta.core.AndroidAgentLogger
+import io.github.mangi.eta.core.safeLogType
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -39,12 +41,22 @@ internal class AgentLoop(
     private val sensitiveToolCallIds = linkedSetOf<String>()
     private var pendingToolImageMessage: JSONObject? = null
 
+    private companion object {
+        private const val MAX_PROVIDER_TRANSIENT_RETRIES = 2
+        private const val MAX_EMPTY_CONTENT_RETRIES = 1
+
+        /** 指数退避：第 1 次 1s，第 2 次 2s，封顶 4s。 */
+        private fun providerRetryBackoffMs(attempt: Int): Long =
+            (1_000L shl (attempt - 1)).coerceAtMost(4_000L)
+    }
+
     fun reasoningSnapshot(): String = accumulatedReasoning.toString().trim()
 
     fun sensitiveToolCallIdsSnapshot(): Set<String> = sensitiveToolCallIds.toSet()
 
     fun run(): Result {
         var round = 1
+        var emptyContentRetries = 0
 
         while (true) {
             runController.throwIfCancelled()
@@ -54,25 +66,58 @@ internal class AgentLoop(
             val roundTools = toolsForRound?.invoke() ?: tools
             toolCallValidator = AgentToolCallValidator(roundTools)
             val reasoningLengthBeforeRound = accumulatedReasoning.length
-            val providerResponse = try {
-                provider.complete(
-                    request = ProviderRequest(
-                        config = config,
-                        messages = messages,
-                        tools = roundTools,
-                    ),
-                    runController = runController,
-                ) { providerEvent ->
-                    if (
-                        providerEvent is ProviderEvent.BlockDelta &&
-                        providerEvent.kind == AssistantBlockKind.THINKING
-                    ) {
-                        accumulatedReasoning.append(providerEvent.delta)
+            var providerResponse: ProviderResponse
+            try {
+                var providerAttempt = 0
+                while (true) {
+                    // 瞬时错误重试：仅在"服务端/网络层瞬时错误"且"本次尚未向 UI 交付任何内容块"
+                    // 时重试。这样既不重复执行工具，也不会在已输出部分内容后重复拼接导致乱序。
+                    var deliveredAnyBlockDelta = false
+                    runController.throwIfCancelled()
+                    val response = try {
+                        provider.complete(
+                            request = ProviderRequest(
+                                config = config,
+                                messages = messages,
+                                tools = roundTools,
+                            ),
+                            runController = runController,
+                        ) { providerEvent ->
+                            if (providerEvent is ProviderEvent.BlockDelta) {
+                                deliveredAnyBlockDelta = true
+                                if (providerEvent.kind == AssistantBlockKind.THINKING) {
+                                    accumulatedReasoning.append(providerEvent.delta)
+                                }
+                            }
+                            providerEvent.toAgentEvent(round)?.let(onEvent)
+                        }
+                    } catch (throwable: Throwable) {
+                        // 取消优先：用户取消不能被瞬时重试吞掉。
+                        runController.throwIfCancelled()
+                        if (
+                            AgentTransientError.isTransient(throwable) &&
+                            !deliveredAnyBlockDelta &&
+                            providerAttempt < MAX_PROVIDER_TRANSIENT_RETRIES
+                        ) {
+                            providerAttempt += 1
+                            // 日志属于 best-effort，失败不得阻断重试流程或让纯 JVM 单测崩溃。
+                            runCatching {
+                                AndroidAgentLogger.warn(
+                                    "Agent provider transient error, retrying " +
+                                        "(attempt $providerAttempt): ${throwable.safeLogType()}"
+                                )
+                            }
+                            Thread.sleep(providerRetryBackoffMs(providerAttempt))
+                            continue
+                        }
+                        throw throwable
                     }
-                    providerEvent.toAgentEvent(round)?.let(onEvent)
+                    providerResponse = response
+                    break
                 }
             } finally {
                 // 截图只供紧接着的一次推理消费；成功、失败或取消后都不进入后续上下文与归档。
+                // 重试期间保留该消息，确保重试的那次推理仍能消费到同一张工具截图。
                 discardPendingToolImageMessage()
             }
 
@@ -140,6 +185,28 @@ internal class AgentLoop(
             val content = assistantMessage.optString("content").trim()
             if (content.isBlank() || content == "null") {
                 val finishReason = assistantMessage.optString("finish_reason")
+                // DeepSeek 等推理模型在长 Agent 循环里偶发以 end_turn/stop 结束却未输出正文：
+                // 交付内容可能落在 reasoning_content 而 content 为空。这不应让整个 run 崩溃。
+                // 先做一次温和引导重试；重试仍为空则用思考内容兜底收尾。
+                if (
+                    providerResponse.stopReason == AssistantStopReason.END_TURN &&
+                    emptyContentRetries < MAX_EMPTY_CONTENT_RETRIES
+                ) {
+                    emptyContentRetries += 1
+                    replaceLastAssistantBlankContent()
+                    messages.put(AgentConversationCodec.userTextMessage(emptyContentRetryPrompt()))
+                    round += 1
+                    continue
+                }
+                val fallback = reasoningSnapshot()
+                if (fallback.isNotBlank()) {
+                    onEvent(AgentEvent.RunFinished(round = round, contentChars = fallback.length))
+                    return Result(
+                        content = fallback,
+                        reasoningContent = reasoningSnapshot(),
+                        sensitiveToolCallIds = sensitiveToolCallIds.toSet(),
+                    )
+                }
                 error("模型接口第 $round 轮返回为空${finishReason.takeIf { it.isNotBlank() }?.let { "：$it" }.orEmpty()}")
             }
 
@@ -150,6 +217,19 @@ internal class AgentLoop(
                 sensitiveToolCallIds = sensitiveToolCallIds.toSet(),
             )
         }
+    }
+
+    private fun replaceLastAssistantBlankContent() {
+        val last = messages.optJSONObject(messages.length() - 1) ?: return
+        if (last.optString("role") != "assistant") return
+        if (last.optString("content").isBlank()) {
+            last.put("content", "[模型本轮未输出正文，已引导重试]")
+        }
+    }
+
+    private fun emptyContentRetryPrompt(): String {
+        return "你上一轮结束回复时未输出任何正文（content 为空）。请基于以上已经完成的全部工作，" +
+            "直接给出一句面向用户的中文最终结论。不要重复执行过程，也不要只输出思考过程。"
     }
 
     private fun appendPendingSteeringMessage(): Boolean {
@@ -266,7 +346,12 @@ internal class AgentLoop(
             messages.put(AgentConversationCodec.toolResultMessage(outcome.call, outcome.result))
         }
 
-        val imageOutcomes = outcomes.filter { outcome -> outcome.result.images.isNotEmpty() }
+        // 纯文本模型（supportsVision=false）：工具截图不进入会话，模型只依赖 UI 树文本。
+        val imageOutcomes = if (config.supportsVision) {
+            outcomes.filter { outcome -> outcome.result.images.isNotEmpty() }
+        } else {
+            emptyList()
+        }
         if (imageOutcomes.isEmpty()) return
 
         // 工具截图是瞬时观察，不是会话资产。下一次推理消费后立即删除。

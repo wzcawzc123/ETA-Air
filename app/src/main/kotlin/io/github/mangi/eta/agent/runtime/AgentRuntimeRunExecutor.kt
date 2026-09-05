@@ -142,6 +142,7 @@ internal class AgentRuntimeRunExecutor(
                 screenshotExcludedPackages = {
                     entrySurfaceGuard?.consumeScreenshotExcludedPackages().orEmpty()
                 },
+                supportsVision = { request.config.supportsVision },
                 beforeToolExecution = { toolName ->
                     val requiresAccessibility =
                         AgentToolRequirements.requiresAccessibility(toolName)

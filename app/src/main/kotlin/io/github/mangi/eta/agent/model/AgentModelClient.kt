@@ -110,6 +110,10 @@ internal object AgentModelClient {
             sessionState = sessionState,
             rootAvailable = initialCapabilities.rootAvailable,
         )
+        // 纯文本模型（supportsVision=false）：发送前剥离全部图片块，避免纯文本接口收到 image_url 报 400。
+        if (!config.supportsVision) {
+            AgentConversationCodec.stripImagesForTextOnlyModel(messages)
+        }
         val transcriptStartIndex = messages.length()
         fun toolsFor(capabilities: AgentToolCapabilities): JSONArray {
             val tools = AgentToolCatalog.build(
@@ -238,6 +242,8 @@ internal object AgentModelClient {
         val deviceDirectTools: Boolean = true,
         val deviceSensitiveReadTools: Boolean = false,
         val deviceSensitiveActionTools: Boolean = false,
+        /** 当前模型是否支持图片输入；false 时运行时剥离所有 image_url，保证纯文本接口不报 400。 */
+        val supportsVision: Boolean = true,
         val thinkingEnabled: Boolean = false,
         val reasoningEffort: ReasoningEffort? = null,
         val reasoningCapabilities: ModelReasoningCapabilities? = null,

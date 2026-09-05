@@ -62,7 +62,10 @@ internal object OpenAiResponsesProvider : AgentProviderClient {
                 onEvent(ProviderEvent.ResponseHeaders(response.code))
                 runController.throwIfCancelled()
                 if (!response.isSuccessful) {
-                    error("模型接口返回 HTTP ${response.code}：${response.body.string().compactError()}")
+                    throw ProviderHttpException(
+                        response.code,
+                        response.body.string().compactError(),
+                    )
                 }
                 val assistant = readStreamingResponse(
                     stream = response.body.byteStream(),

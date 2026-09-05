@@ -145,6 +145,8 @@ data class PendingImageUi(
     val uri: String,
     val dataUrl: String,
     val mimeType: String,
+    /** 用户选择顺序（递增）；发送时按此排序，保证多图顺序与用户选择一致。 */
+    val selectionIndex: Int = 0,
 )
 
 @Immutable

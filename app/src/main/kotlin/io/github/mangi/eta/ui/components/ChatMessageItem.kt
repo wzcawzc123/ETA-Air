@@ -355,6 +355,7 @@ internal fun ChatMessageItem(
             showCopyAction = showCopyAction,
             showMessageActions = showMessageActions,
             messageActionsEnabled = messageActionsEnabled,
+            showRetryOnFailure = message.code == SystemNoticeCode.RuntimeFailed,
             onDelete = { onDeleteMessage(message.id) },
             onRegenerate = { onRegenerateMessage(message.id) },
             modifier = modifier,
@@ -704,6 +705,7 @@ private fun AgentMessageBlock(
     showCopyAction: Boolean,
     showMessageActions: Boolean,
     messageActionsEnabled: Boolean,
+    showRetryOnFailure: Boolean = false,
     onDelete: () -> Unit,
     onRegenerate: () -> Unit,
     modifier: Modifier = Modifier,
@@ -806,7 +808,7 @@ private fun AgentMessageBlock(
                         },
                     )
                 }
-                if (showMessageActions) {
+                if (showMessageActions || showRetryOnFailure) {
                     TooltipBox(text = stringResource(R.string.ui_regenerate_2e1905), enabled = messageActionsEnabled) {
                         IconButton(
                             onClick = onRegenerate,
@@ -822,19 +824,21 @@ private fun AgentMessageBlock(
                             )
                         }
                     }
-                    TooltipBox(text = stringResource(R.string.ui_delete_3755f5), enabled = messageActionsEnabled) {
-                        IconButton(
-                            onClick = onDelete,
-                            enabled = messageActionsEnabled,
-                            minWidth = 30.dp,
-                            minHeight = 30.dp,
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Delete,
-                                contentDescription = stringResource(R.string.ui_delete_this_conversation_3f351b),
-                                modifier = Modifier.size(15.dp),
-                                tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.75f),
-                            )
+                    if (showMessageActions) {
+                        TooltipBox(text = stringResource(R.string.ui_delete_3755f5), enabled = messageActionsEnabled) {
+                            IconButton(
+                                onClick = onDelete,
+                                enabled = messageActionsEnabled,
+                                minWidth = 30.dp,
+                                minHeight = 30.dp,
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Delete,
+                                    contentDescription = stringResource(R.string.ui_delete_this_conversation_3f351b),
+                                    modifier = Modifier.size(15.dp),
+                                    tint = MiuixTheme.colorScheme.onSurfaceVariantSummary.copy(alpha = 0.75f),
+                                )
+                            }
                         }
                     }
                 }

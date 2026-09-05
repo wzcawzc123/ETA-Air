@@ -125,6 +125,7 @@ internal object RuntimeConfigRepository {
                 ?: AnthropicProviderSetting.DEFAULT_ANTHROPIC_VERSION,
             openAiEndpointMode = endpointMode,
             hostedWebSearchEnabled = provider.hostedWebSearchEnabled,
+            supportsVision = model.supportsVision,
             thinkingEnabled = reasoningCapabilities != null,
             reasoningEffort = reasoningCapabilities?.let { ReasoningEffort.DEFAULT }
                 ?: ReasoningEffort.OFF,

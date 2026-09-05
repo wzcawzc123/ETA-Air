@@ -66,7 +66,7 @@ internal object AnthropicMessagesProvider : AgentProviderClient {
                 runController.throwIfCancelled()
                 if (!response.isSuccessful) {
                     val errorBody = response.body.string()
-                    error("Anthropic 接口返回 HTTP ${response.code}：${errorBody.compactError()}")
+                    throw ProviderHttpException(response.code, errorBody.compactError())
                 }
                 val assistant = readStreamingAssistantMessage(response.body.byteStream(), runController, onEvent)
                 onEvent(ProviderEvent.Completed(assistant.optString("finish_reason").ifBlank { null }))

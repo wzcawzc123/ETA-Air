@@ -130,6 +130,35 @@ internal object AgentConversationCodec {
             startsWith("http://", ignoreCase = true) ||
             startsWith("data:image/", ignoreCase = true)
 
+    /**
+     * 纯文本模型（supportsVision=false）发送前剥离全部图片块，原地改写 messages。
+     * 覆盖：image_url（Chat）、input_image（Responses）、image/source（Anthropic）。
+     */
+    fun stripImagesForTextOnlyModel(messages: JSONArray) {
+        val placeholder = JSONObject()
+            .put("type", "text")
+            .put("text", "[图片已忽略：当前模型不支持图片输入]")
+        for (index in 0 until messages.length()) {
+            val message = messages.optJSONObject(index) ?: continue
+            val content = message.opt("content") as? JSONArray ?: continue
+            val cleaned = JSONArray()
+            var removed = false
+            for (itemIndex in 0 until content.length()) {
+                val item = content.optJSONObject(itemIndex) ?: continue
+                val type = item.optString("type")
+                if (type == "image_url" || type == "input_image" || item.has("source")) {
+                    removed = true
+                    continue
+                }
+                cleaned.put(item)
+            }
+            if (removed) {
+                cleaned.put(placeholder)
+                message.put("content", cleaned)
+            }
+        }
+    }
+
     fun assistantHistoryMessage(
         source: JSONObject,
         toolCalls: List<AgentModelClient.ToolCall>,
