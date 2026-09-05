@@ -1,8 +1,8 @@
 package io.github.mangi.eta.data.repository
 
 import android.content.Context
-import android.util.AtomicFile
 import io.github.mangi.eta.data.datastore.SettingsDataStore
+import android.util.AtomicFile
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
@@ -60,7 +60,7 @@ internal class AgentMemoryStore(
     rootDir: File,
 ) {
     private val memoryDir = File(rootDir, DIRECTORY_NAME)
-    private val atomicFile = AtomicFile(File(memoryDir, FILE_NAME))
+    private val memoryFile = File(memoryDir, FILE_NAME)
     private val lock = Any()
 
     fun snapshot(): AgentMemorySnapshot = synchronized(lock) {
@@ -101,10 +101,9 @@ internal class AgentMemoryStore(
     }
 
     private fun snapshotLocked(): AgentMemorySnapshot {
-        val file = atomicFile.baseFile
-        if (!file.exists()) return snapshotOf("")
+        if (!memoryFile.exists()) return snapshotOf("")
         val bytes = try {
-            atomicFile.openRead().use { it.readBytes() }
+            memoryFile.readBytes()
         } catch (throwable: IOException) {
             throw AgentMemoryException(
                 code = "MEMORY_READ_FAILED",
@@ -136,20 +135,15 @@ internal class AgentMemoryStore(
                 message = "无法创建记忆目录",
             )
         }
-        val output = try {
-            atomicFile.startWrite()
-        } catch (throwable: IOException) {
-            throw AgentMemoryException(
-                code = "MEMORY_WRITE_FAILED",
-                message = "无法开始写入记忆文件",
-                cause = throwable,
-            )
-        }
+        val temp = File(memoryDir, "$FILE_NAME.tmp")
         try {
-            output.write(bytes)
-            atomicFile.finishWrite(output)
+            temp.writeBytes(bytes)
+            if (!temp.renameTo(memoryFile)) {
+                memoryFile.writeBytes(bytes)
+                temp.delete()
+            }
         } catch (throwable: Throwable) {
-            atomicFile.failWrite(output)
+            temp.delete()
             throw AgentMemoryException(
                 code = "MEMORY_WRITE_FAILED",
                 message = "无法保存记忆文件",

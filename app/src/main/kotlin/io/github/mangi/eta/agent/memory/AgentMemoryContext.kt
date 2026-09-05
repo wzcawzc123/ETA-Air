@@ -66,11 +66,20 @@ internal object AgentMemoryContextBuilder {
         if (content.isEmpty()) return ""
         val lines = content.split('\n')
         val start = lines.indexOfFirst { it.trim() == CORE_HEADING }
-        if (start < 0) return ""
-        val end = ((start + 1) until lines.size)
-            .firstOrNull { index -> lines[index].startsWith("# ") }
+        if (start >= 0) {
+            val end = ((start + 1) until lines.size)
+                .firstOrNull { index -> lines[index].startsWith("# ") }
+                ?: lines.size
+            return lines.subList(start, end).joinToString("\n")
+        }
+        // 容错：MEMORY.md 未写 # 核心记忆 时，回退到第一个标题段（多为用户画像），
+        // 避免核心正文从未注入 <memory_core>，只剩 headings 索引。
+        val firstHeading = lines.indexOfFirst { HEADING.matches(it.trimEnd()) }
+        if (firstHeading < 0) return ""
+        val end = ((firstHeading + 1) until lines.size)
+            .firstOrNull { index -> HEADING.matches(lines[index].trimEnd()) }
             ?: lines.size
-        return lines.subList(start, end).joinToString("\n")
+        return lines.subList(firstHeading, end).joinToString("\n")
     }
 
     private val HEADING = Regex("^#{1,2}\\s+.+$")

@@ -91,6 +91,8 @@ internal object AgentModelClient {
         runController: AgentRunController = AgentRunController(),
         skillContext: SkillContext = SkillContext.EMPTY,
         memoryContext: AgentMemoryContext = AgentMemoryContext.DISABLED,
+        conversationSummary: String? = null,
+        sessionState: String? = null,
         additionalTools: JSONArray = JSONArray(),
         capabilitiesProvider: () -> AgentToolCapabilities = { AgentToolCapabilities(rootAvailable = false) },
         onEvent: (AgentEvent) -> Unit = {}
@@ -104,6 +106,8 @@ internal object AgentModelClient {
             history,
             skillContext,
             memoryContext,
+            conversationSummary = conversationSummary,
+            sessionState = sessionState,
             rootAvailable = initialCapabilities.rootAvailable,
         )
         val transcriptStartIndex = messages.length()

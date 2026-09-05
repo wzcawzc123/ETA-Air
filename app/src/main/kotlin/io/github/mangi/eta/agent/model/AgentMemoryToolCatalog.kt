@@ -97,5 +97,80 @@ internal object AgentMemoryToolCatalog {
                         .put("required", JSONArray().put("mode").put("revision")),
                 ),
             )
+            .put(
+                AgentToolSchema.function(
+                    name = "memory_search",
+                    description = "Search local conversation summaries and MEMORY.md full text for earlier context (what was discussed/decided/remembered). Returns up to 8 matching snippets. Summary hits carry a 'conversation' field identifying which PAST conversation they belong to — treat those as from another session, never as part of the current conversation; MEMORY.md hits carry no conversation field.",
+                    parameters = JSONObject()
+                        .put("type", "object")
+                        .put(
+                            "properties",
+                            JSONObject()
+                                .put(
+                                    "query",
+                                    JSONObject()
+                                        .put("type", "string")
+                                        .put("minLength", 1)
+                                        .put("maxLength", 120)
+                                        .put("description", "Keywords to search for in past conversation summaries and memory headings."),
+                                ),
+                        )
+                        .put("required", JSONArray().put("query")),
+                ),
+            )
+            .put(
+                AgentToolSchema.function(
+                    name = "session_state_get",
+                    description = "Read the current conversation's structured session state (objective / completed / pending / decisions) that you maintain via session_state_update. Use it to answer 'our goal / what have we done / what are we deciding' or to resume.",
+                    parameters = JSONObject()
+                        .put("type", "object")
+                        .put("properties", JSONObject()),
+                ),
+            )
+            .put(
+                AgentToolSchema.function(
+                    name = "session_state_update",
+                    description = "Update the current conversation's structured session state (objective / completed / pending / decisions). Call it at key milestones so 'what we're doing / decided / done' is remembered deterministically. Keep entries concise; omit a field you don't need to change.",
+                    parameters = JSONObject()
+                        .put("type", "object")
+                        .put(
+                            "properties",
+                            JSONObject()
+                                .put("objective", JSONObject().put("type", "string").put("maxLength", 400))
+                                .put("completed", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")))
+                                .put("pending", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string")))
+                                .put("decisions", JSONObject().put("type", "array").put("items", JSONObject().put("type", "string"))),
+                        ),
+                ),
+            )
+            .put(
+                AgentToolSchema.function(
+                    name = "memory_consolidate",
+                    description = "Merge/dedupe MEMORY.md lines that repeat or overlap semantically into one canonical entry (e.g. the same fact/phrase stated twice). Pass source_lines (1-based line numbers of the redundant lines) and a canonical string; the redundant lines are replaced by the canonical entry. Use when the memory is getting repetitive.",
+                    parameters = JSONObject()
+                        .put("type", "object")
+                        .put(
+                            "properties",
+                            JSONObject()
+                                .put(
+                                    "merges",
+                                    JSONObject()
+                                        .put("type", "array")
+                                        .put(
+                                            "items",
+                                            JSONObject()
+                                                .put("type", "object")
+                                                .put(
+                                                    "properties",
+                                                    JSONObject()
+                                                        .put("source_lines", JSONObject().put("type", "array").put("items", JSONObject().put("type", "integer")))
+                                                        .put("canonical", JSONObject().put("type", "string").put("maxLength", 600)),
+                                                ),
+                                        ),
+                                ),
+                        )
+                        .put("required", JSONArray().put("merges")),
+                ),
+            )
     }
 }

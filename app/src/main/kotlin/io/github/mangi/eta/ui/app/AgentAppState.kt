@@ -26,6 +26,12 @@ import io.github.mangi.eta.agent.model.AgentFileReferenceKind
 import io.github.mangi.eta.agent.model.AgentFileReferencePolicy
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
+import io.github.mangi.eta.agent.model.LlmAgentFactExtractor
+import io.github.mangi.eta.agent.model.MemoryAutoConsolidator
+import io.github.mangi.eta.agent.model.OnnxMemoryEmbedder
+import io.github.mangi.eta.agent.model.ProviderClientFactory
+import io.github.mangi.eta.agent.model.SessionStateCodec
+import io.github.mangi.eta.agent.model.VectorMath
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentExecutionService
 import io.github.mangi.eta.agent.runtime.AgentExternalArchivePayload
@@ -39,10 +45,15 @@ import io.github.mangi.eta.agent.skill.SkillRuntime
 import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
+import io.github.mangi.eta.data.datastore.SettingsDataStore
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
 import io.github.mangi.eta.data.model.ReasoningEffort
+import io.github.mangi.eta.data.repository.AgentMemoryMutation
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
+import io.github.mangi.eta.data.repository.AgentMemoryWriteResult
+import io.github.mangi.eta.data.repository.ConversationSummaryStore
 import io.github.mangi.eta.data.repository.EtaBackupRepository
+import io.github.mangi.eta.data.repository.SessionStateStore
 import io.github.mangi.eta.data.repository.EtaBackupSummary
 import io.github.mangi.eta.data.repository.ProviderRepository
 import io.github.mangi.eta.data.repository.RuntimeConfigRepository
@@ -1107,6 +1118,12 @@ internal class AgentAppState(
                     source = "user_attach",
                 )
             }
+            val conversationSummary = runCatching {
+                ConversationSummaryStore.summary(conversationId)
+            }.getOrNull()
+            val sessionState = runCatching {
+                SessionStateStore.get(conversationId)?.let(SessionStateCodec::render)
+            }.getOrNull()
             val result = runInterruptible {
                 AgentRuntimeClient(appContext, AndroidAgentLogger).run(
                     request = AgentRuntimeWire.RunRequest(
@@ -1115,6 +1132,8 @@ internal class AgentAppState(
                         config = config,
                         images = modelImages,
                         history = history,
+                        conversationSummary = conversationSummary,
+                        sessionState = sessionState,
                         handoff = AgentRuntimeWire.EntryHandoff(
                             id = runId,
                             source = AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE,
@@ -1127,6 +1146,7 @@ internal class AgentAppState(
             withContext(Dispatchers.Main) {
                 applyRunResult(runId, result, acknowledgeRuntimeResult = true)
             }
+            maybeDistillFacts(conversationId, prompt, result)
         }
         currentRunJob = preparationJob
         if (!RootAccess.isGranted) {
@@ -2262,6 +2282,79 @@ internal class AgentAppState(
         }
     }
 
+    /**
+     * P3：自动事实沉淀（默认关闭）。run 成功后从用户输入与回答提取稳定事实，
+     * 去重后经 MEMORY.md 原子写追加（revision 冲突则放弃），全程静默失败。
+     */
+    private fun cleanMemoryLine(line: String): String =
+        line.trim().removePrefix("- ").removePrefix("• ").replace("[沉淀]", "").trim()
+    private fun maybeDistillFacts(
+        conversationId: String,
+        userText: String,
+        result: AgentRuntimeWire.RunResult,
+    ) {
+        if (!result.ok) return
+        scope.launch {
+            runCatching {
+                if (!SettingsDataStore.settings().factDistillEnabled) return@launch
+                val config = RuntimeConfigRepository.currentRuntimeConfig() ?: return@launch
+                val extractor = LlmAgentFactExtractor(config, ProviderClientFactory.getClient(config))
+                val snapshot = AgentMemoryRepository.snapshot()
+                val memoryLines = snapshot.content.split('\n')
+                // 第 3 层：向量候选粗筛。嵌入可用且记忆行较多时，只挑与本轮最相关的 topK 行交给 LLM 判重
+                // （既抓得住语义近重复，又限制 prompt 体积、避免无关行干扰分类）。
+                val memoryEntryCount = memoryLines.count { it.trim().startsWith("-") || it.trim().startsWith("•") }
+                val candidateLines: List<String> = if (memoryEntryCount > DEDUP_CANDIDATE_MIN) {
+                    runCatching {
+                        val embedder = OnnxMemoryEmbedder.get(appContext)
+                        if (embedder != null) {
+                            val queryVec = embedder.embed(userText)
+                            val lineVecs = memoryLines.map { embedder.embed(cleanMemoryLine(it)) }
+                            if (queryVec != null && lineVecs.none { it == null }) {
+                                val idx = VectorMath.topK(
+                                    queryVec,
+                                    lineVecs.mapNotNull { it },
+                                    DEDUP_CANDIDATE_MAX,
+                                )
+                                idx.map { memoryLines[it] }
+                            } else memoryLines
+                        } else memoryLines
+                    }.getOrElse { memoryLines }
+                } else memoryLines
+                // 语义判重：一次 LLM 调用同时"抽事实 + 对照记忆行判定 ADD/UPDATE/SKIP"。
+                // 同义/重叠/换词重述会走 UPDATE 或 SKIP，不再是字符启发式漏判导致的重复沉淀。
+                val plan = extractor.extractPlan(userText, result.content, candidateLines)
+                if (plan.isEmpty) return@launch
+                var revision = snapshot.revision
+                // 先"覆盖/更新"已有行：每次用最新 revision，冲突则整体放弃（静默，与既有行为一致）。
+                for (update in plan.updates) {
+                    val result = AgentMemoryRepository.mutate(
+                        AgentMemoryMutation.ReplaceRange(
+                            revision,
+                            update.startLine,
+                            update.startLine,
+                            "- [沉淀] ${update.content}",
+                        )
+                    )
+                    when (result) {
+                        is AgentMemoryWriteResult.Success -> revision = result.snapshot.revision
+                        is AgentMemoryWriteResult.Conflict -> return@launch
+                    }
+                }
+                // 再追加"新增事实"。
+                if (plan.additions.isNotEmpty()) {
+                    val content = "\n" + plan.additions.joinToString("\n") { "- [沉淀] $it" }
+                    when (AgentMemoryRepository.mutate(AgentMemoryMutation.Append(revision, content))) {
+                        is AgentMemoryWriteResult.Success -> Unit
+                        is AgentMemoryWriteResult.Conflict -> Unit
+                    }
+                }
+                // 第 2 层：记忆条数超阈值时后台自动合并（不等 agent 手动调 memory_consolidate）。
+                runCatching { MemoryAutoConsolidator.consolidate(config, ProviderClientFactory.getClient(config)) }
+            }
+        }
+    }
+
     private companion object {
         const val MAX_TITLE_CHARS = 24
         const val MAX_PREVIEW_CHARS = 48
@@ -2270,6 +2363,8 @@ internal class AgentAppState(
         // 数据状态以较粗粒度发布，文字显现由独立的帧时钟连续推进。
         // 这与 Kimi 将流式数据和视觉动画分层的做法一致。
         const val STREAM_UI_UPDATE_INTERVAL_MS = 80L
+        const val DEDUP_CANDIDATE_MIN = 12
+        const val DEDUP_CANDIDATE_MAX = 12
 
         fun emptyChatState(thinkingEnabled: Boolean): AgentChatHomeUiState =
             AgentChatHomeUiState(

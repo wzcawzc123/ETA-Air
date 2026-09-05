@@ -11,9 +11,15 @@ import io.github.mangi.eta.agent.device.DeviceControlUnavailableException
 import io.github.mangi.eta.agent.device.RootAccess
 import io.github.mangi.eta.agent.device.RootShellDeviceController
 import io.github.mangi.eta.agent.device.BoundedRootCommandExecutor
+import io.github.mangi.eta.agent.model.AgentMemorySearch
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.AgentScreenObservationContract
 import io.github.mangi.eta.agent.model.AgentSensitiveToolPolicy
+import io.github.mangi.eta.agent.model.ConsolidateMerge
+import io.github.mangi.eta.agent.model.ConsolidatePlan
+import io.github.mangi.eta.agent.model.MemoryConsolidate
+import io.github.mangi.eta.agent.model.SessionState
+import io.github.mangi.eta.agent.model.SessionStateCodec
 import io.github.mangi.eta.agent.overlay.AgentHapticFeedback
 import io.github.mangi.eta.agent.overlay.GestureIndicator
 import io.github.mangi.eta.agent.runtime.AgentAppContext
@@ -44,7 +50,9 @@ import io.github.mangi.eta.data.repository.AgentMemoryException
 import io.github.mangi.eta.data.repository.AgentMemoryMutation
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
 import io.github.mangi.eta.data.repository.AgentMemoryWriteResult
+import io.github.mangi.eta.data.repository.ConversationSummaryStore
 import io.github.mangi.eta.data.repository.LinuxEnvironmentSettingsRepository
+import io.github.mangi.eta.data.repository.SessionStateStore
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -75,6 +83,7 @@ internal class AgentLocalTools(
     private val memoryToolsEnabled: () -> Boolean = {
         runBlocking { AgentMemoryRepository.isEnabled() }
     },
+    private val currentConversationId: () -> String? = { null },
     private val screenshotExcludedPackages: () -> Set<String> = { emptySet() },
     private val screenObservationProvider: (
         (AgentScreenObservationContract.Options) -> RootShellDeviceController.Observation
@@ -205,6 +214,10 @@ internal class AgentLocalTools(
                 "list_directory" -> textResult(terminalTool { listDirectory(args) })
                 "memory_get" -> textResult(memoryGet(args))
                 "memory_write" -> textResult(memoryWrite(args))
+                "memory_search" -> textResult(memorySearch(args))
+                "session_state_get" -> textResult(sessionStateGet(args))
+                "session_state_update" -> textResult(sessionStateUpdate(args))
+                "memory_consolidate" -> textResult(memoryConsolidate(args))
                 "skills_list" -> textResult(skillsList(args))
                 "skills_read" -> textResult(skillsRead(args))
                 "skills_read_resource" -> textResult(skillsReadResource(args))
@@ -334,6 +347,89 @@ internal class AgentLocalTools(
     } catch (failure: AgentMemoryException) {
         errorResult(failure.code, failure.message ?: "记忆写入失败")
     }
+
+    private fun memorySearch(args: JSONObject): String {
+        val query = args.optString("query")
+        if (query.isBlank()) return errorResult("MISSING_QUERY", "缺少 query 参数")
+        val result = runBlocking {
+            runCatching {
+                val summaries = ConversationSummaryStore.all()
+                val memoryContent = AgentMemoryRepository.snapshot().content
+                AgentMemorySearch.search(query, summaries, memoryContent)
+            }.getOrElse { emptyList() }
+        }
+        if (result.isEmpty()) {
+            return errorResult("NO_MATCH", "没有找到匹配的早期记忆")
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("query", query)
+            .put("hits", JSONArray().apply {
+                result.forEach { hit ->
+                    put(
+                        JSONObject().apply {
+                            put("source", hit.source)
+                            put("snippet", hit.snippet)
+                            put("score", hit.score)
+                            // 标注来源会话，agent 借此区分"当前会话/过去会话"，避免把过去内容当作当前会话。
+                            hit.conversationLabel?.let { put("conversation", it) }
+                        }
+                    )
+                }
+            })
+            .toString()
+    }
+
+    private fun memoryConsolidate(args: JSONObject): String {
+        val mergesArr = args.optJSONArray("merges") ?: return errorResult("MISSING_MERGES", "缺少 merges")
+        val merges = mutableListOf<ConsolidateMerge>()
+        for (i in 0 until mergesArr.length()) {
+            val o = mergesArr.optJSONObject(i) ?: continue
+            val lines = o.optJSONArray("source_lines")?.let { ja ->
+                (0 until ja.length()).mapNotNull { ja.optInt(it) }.toList()
+            } ?: continue
+            val canonical = o.optString("canonical").trim()
+            if (canonical.isBlank()) continue
+            merges += ConsolidateMerge(lines, canonical)
+        }
+        if (merges.isEmpty()) return errorResult("NO_MERGE", "没有有效的合并项")
+        val snapshot = AgentMemoryRepository.snapshot()
+        val merged = MemoryConsolidate.apply(ConsolidatePlan(merges), snapshot.content.split('\n'))
+        val newContent = merged.joinToString("\n")
+        if (newContent == snapshot.content) {
+            return JSONObject().put("ok", true).put("changed", false).toString()
+        }
+        AgentMemoryRepository.replaceAll(newContent)
+        return JSONObject().put("ok", true).put("changed", true).toString()
+    }
+
+    private fun sessionStateGet(args: JSONObject): String {
+        val cid = currentConversationId() ?: return errorResult("NO_CONVERSATION", "无法确定当前会话")
+        val state = runBlocking { runCatching { SessionStateStore.get(cid) }.getOrNull() }
+        if (state == null || state.isEmpty) {
+            return JSONObject().put("ok", true).put("empty", true).put("state", "").toString()
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("empty", false)
+            .put("state", SessionStateCodec.render(state))
+            .toString()
+    }
+
+    private fun sessionStateUpdate(args: JSONObject): String {
+        val cid = currentConversationId() ?: return errorResult("NO_CONVERSATION", "无法确定当前会话")
+        val state = SessionState(
+            objective = args.optString("objective"),
+            completed = args.optJSONArray("completed").stringList(),
+            pending = args.optJSONArray("pending").stringList(),
+            decisions = args.optJSONArray("decisions").stringList(),
+        )
+        runBlocking { runCatching { SessionStateStore.set(cid, state) } }
+        return JSONObject().put("ok", true).put("saved", true).toString()
+    }
+
+    private fun JSONArray?.stringList(): List<String> =
+        if (this == null) emptyList() else (0 until length()).mapNotNull { optString(it).takeIf { s -> s.isNotBlank() } }
 
     private fun browserUse(args: JSONObject, toolCallId: String): AgentModelClient.ToolResult {
         if (!browserToolsEnabled()) {
@@ -1364,6 +1460,6 @@ internal class AgentLocalTools(
         val DEVICE_TOOL_NAMES =
             DEVICE_DIRECT_TOOL_NAMES + DEVICE_SENSITIVE_READ_TOOL_NAMES +
                 DEVICE_SENSITIVE_ACTION_TOOL_NAMES
-        val MEMORY_TOOL_NAMES = setOf("memory_get", "memory_write")
+        val MEMORY_TOOL_NAMES = setOf("memory_get", "memory_write", "memory_search")
     }
 }
