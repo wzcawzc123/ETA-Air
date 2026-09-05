@@ -27,6 +27,8 @@ import io.github.mangi.eta.agent.model.AgentFileReferencePolicy
 import io.github.mangi.eta.agent.model.AgentFileReferencePromptCodec
 import io.github.mangi.eta.agent.model.AgentHistorySummary
 import io.github.mangi.eta.agent.model.AgentHistoryWindow
+import io.github.mangi.eta.agent.model.AgentConversationCodec
+import io.github.mangi.eta.agent.model.AgentImageSummarizer
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.agent.model.LlmAgentFactExtractor
 import io.github.mangi.eta.agent.model.LlmConversationSummarizer
@@ -2436,11 +2438,9 @@ internal class AgentAppState(
     }
 
     /**
-     * 图片文字摘要（ETA-2 特性，ETA-Air 暂未启用）。
-     *
-     * 依赖 AgentImageSummarizer 与 AgentConversationCodec.replaceImagePlaceholder，
-     * 二者尚未迁移到 ETA-Air（无对应 object / 方法）。此处仅保留签名与触发点，
-     * 特性暂不启用（静默，不破坏编译）。待依赖补齐后，将 ETA-2 中本函数实现原样搬入即可。
+     * 图片文字摘要（默认开启）。run 结束后对本轮用户附图异步生成文字摘要，
+     * 替换持久化历史中的占位文字。后续轮次模型从摘要里回忆图片内容。
+     * 失败静默，不影响主流程。
      */
     private fun maybeSummarizeImages(
         conversationId: String,
@@ -2452,9 +2452,28 @@ internal class AgentAppState(
         scope.launch {
             runCatching {
                 if (!SettingsDataStore.settings().imageSummaryEnabled) return@launch
-                // AgentImageSummarizer / AgentConversationCodec.replaceImagePlaceholder 未迁移，
-                // 无法对附图生成文字摘要，静默跳过。
-                return@launch
+                val modelImages = images.toHistoryImages()
+                val imageUrls = AgentImageSummarizer.extractImageReferences(modelImages)
+                if (imageUrls.isEmpty()) return@launch
+                val userText = prompt.take(200)
+                val summary = AgentImageSummarizer.summarize(config, imageUrls, userText)
+                if (summary.isNullOrBlank()) return@launch
+                withContext(Dispatchers.Main) {
+                    val current = homeState
+                    var changed = false
+                    val updatedHistory = current.history.map { msg ->
+                        val updated = AgentConversationCodec.replaceImagePlaceholder(msg, summary)
+                        if (updated !== msg) changed = true
+                        updated
+                    }
+                    if (changed) {
+                        updateConversation(
+                            conversationId,
+                            current.copy(history = updatedHistory),
+                        )
+                        persistConversations()
+                    }
+                }
             }
         }
     }

@@ -356,6 +356,23 @@ internal object AgentConversationCodec {
             }
         }
 
+    /**
+     * 将历史消息里的图片占位文字替换为 LLM 生成的文字摘要。
+     *
+     * 在异步摘要生成完成后调用：找到 contentJson 中的占位标记（[IMAGE_OMITTED_TEXT]），
+     * 替换为 `[图片摘要] <摘要内容>`，使后续轮次模型能通过文字回忆图片。
+     * 若消息不含占位标记，原样返回，不产生变更。
+     */
+    fun replaceImagePlaceholder(
+        message: AgentModelClient.ConversationMessage,
+        summary: String,
+    ): AgentModelClient.ConversationMessage {
+        if (!message.contentJson.contains(IMAGE_OMITTED_TEXT)) return message
+        val replaced = message.contentJson.replace(IMAGE_OMITTED_TEXT, "[图片摘要] $summary")
+        if (replaced == message.contentJson) return message
+        return message.copy(contentJson = replaced)
+    }
+
     private fun sanitizeToolCallsJson(raw: String): String {
         if (raw.isBlank()) return ""
         val source = runCatching { JSONArray(raw) }.getOrNull() ?: return ""
