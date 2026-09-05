@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-build-${{ github.ref }}
@@ -115,3 +117,16 @@ jobs:
           archive: false
           if-no-files-found: error
           retention-days: 14
+
+      - name: 发布 GitHub Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          printf -v notes 'Eta %s 发布构建。\n\n由 GitHub Actions 自动构建：\n- Debug APK（未签名）\n- Release APK（已签名）' "$tag"
+          gh release create "$tag" \
+            "$RUNNER_TEMP/apks/app-debug.apk" \
+            "$RUNNER_TEMP/apks/app-release.apk" \
+            --title "Eta $tag" \
+            --notes "$notes"
