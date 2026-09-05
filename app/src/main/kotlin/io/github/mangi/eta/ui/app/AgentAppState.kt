@@ -1146,7 +1146,9 @@ internal class AgentAppState(
             withContext(Dispatchers.Main) {
                 applyRunResult(runId, result, acknowledgeRuntimeResult = true)
             }
+            maybeRegenerateConversationSummary(conversationId, history, config)
             maybeDistillFacts(conversationId, prompt, result)
+            maybeSummarizeImages(conversationId, images, config, prompt)
         }
         currentRunJob = preparationJob
         if (!RootAccess.isGranted) {
@@ -2351,6 +2353,46 @@ internal class AgentAppState(
                 }
                 // 第 2 层：记忆条数超阈值时后台自动合并（不等 agent 手动调 memory_consolidate）。
                 runCatching { MemoryAutoConsolidator.consolidate(config, ProviderClientFactory.getClient(config)) }
+            }
+        }
+    }
+
+    /**
+     * P2：长对话滚动摘要（ETA-2 特性，ETA-Air 暂未启用）。
+     *
+     * 依赖 LlmConversationSummarizer、AgentHistorySummary 与 Settings.conversationSummaryEnabled，
+     * 三者尚未迁移到 ETA-Air（无对应文件/字段）。完整搬入会产生未解析引用、编译失败，
+     * 故此处仅保留签名与触发点，特性暂不启用（静默 return，不破坏编译）。
+     * 待上述依赖补齐后，将 ETA-2 中本函数实现原样搬入即可。
+     */
+    private fun maybeRegenerateConversationSummary(
+        conversationId: String,
+        history: List<AgentModelClient.ConversationMessage>,
+        config: AgentModelClient.ModelConfig,
+    ) {
+        return
+    }
+
+    /**
+     * 图片文字摘要（ETA-2 特性，ETA-Air 暂未启用）。
+     *
+     * 依赖 AgentImageSummarizer 与 AgentConversationCodec.replaceImagePlaceholder，
+     * 二者尚未迁移到 ETA-Air（无对应 object / 方法）。此处仅保留签名与触发点，
+     * 特性暂不启用（静默，不破坏编译）。待依赖补齐后，将 ETA-2 中本函数实现原样搬入即可。
+     */
+    private fun maybeSummarizeImages(
+        conversationId: String,
+        images: List<PendingImageUi>,
+        config: AgentModelClient.ModelConfig,
+        prompt: String,
+    ) {
+        if (images.isEmpty()) return
+        scope.launch {
+            runCatching {
+                if (!SettingsDataStore.settings().imageSummaryEnabled) return@launch
+                // AgentImageSummarizer / AgentConversationCodec.replaceImagePlaceholder 未迁移，
+                // 无法对附图生成文字摘要，静默跳过。
+                return@launch
             }
         }
     }
